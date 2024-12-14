@@ -1,13 +1,13 @@
 import {
-  bingWebModelKeys,
-  claudeWebModelKeys,
   clearOldAccessToken,
   getUserConfig,
-  Models,
+  isUsingBingWebModel,
+  isUsingClaudeWebModel,
   setAccessToken,
 } from '../config/index.mjs'
 import Browser from 'webextension-polyfill'
 import { t } from 'i18next'
+import { apiModeToModelName, modelNameToDesc } from '../utils/model-name-convert.mjs'
 
 export async function getChatGptAccessToken() {
   await clearOldAccessToken()
@@ -15,12 +15,12 @@ export async function getChatGptAccessToken() {
   if (userConfig.accessToken) {
     return userConfig.accessToken
   } else {
-    const cookie = (await Browser.cookies.getAll({ url: 'https://chat.openai.com/' }))
+    const cookie = (await Browser.cookies.getAll({ url: 'https://chatgpt.com/' }))
       .map((cookie) => {
         return `${cookie.name}=${cookie.value}`
       })
       .join('; ')
-    const resp = await fetch('https://chat.openai.com/api/auth/session', {
+    const resp = await fetch('https://chatgpt.com/api/auth/session', {
       headers: {
         Cookie: cookie,
       },
@@ -70,13 +70,14 @@ export function handlePortError(session, port, err) {
       else if (['authentication token has expired'].some((m) => err.message.includes(m)))
         port.postMessage({ error: 'UNAUTHORIZED' })
       else if (
-        claudeWebModelKeys.includes(session.modelName) &&
+        isUsingClaudeWebModel(session) &&
         ['Invalid authorization', 'Session key required'].some((m) => err.message.includes(m))
       )
-        port.postMessage({ error: t('Please login at https://claude.ai first') })
+        port.postMessage({
+          error: t('Please login at https://claude.ai first, and then click the retry button'),
+        })
       else if (
-        // `.some` for multi mode models. e.g. bingFree4-balanced
-        bingWebModelKeys.some((n) => session.modelName.includes(n)) &&
+        isUsingBingWebModel(session) &&
         ['/turing/conversation/create: failed to parse response body.'].some((m) =>
           err.message.includes(m),
         )
@@ -86,7 +87,7 @@ export function handlePortError(session, port, err) {
     }
   } else {
     const errMsg = JSON.stringify(err)
-    if (bingWebModelKeys.some((n) => session.modelName.includes(n)) && errMsg.includes('isTrusted'))
+    if (isUsingBingWebModel(session) && errMsg.includes('isTrusted'))
       port.postMessage({ error: t('Please login at https://bing.com first') })
     else port.postMessage({ error: errMsg ?? 'unknown error' })
   }
@@ -101,7 +102,13 @@ export function registerPortListener(executor) {
       if (!session) return
       const config = await getUserConfig()
       if (!session.modelName) session.modelName = config.modelName
-      if (!session.aiName) session.aiName = Models[session.modelName].desc
+      if (!session.apiMode && session.modelName !== 'customModel') session.apiMode = config.apiMode
+      if (!session.aiName)
+        session.aiName = modelNameToDesc(
+          session.apiMode ? apiModeToModelName(session.apiMode) : session.modelName,
+          t,
+          config.customModelName,
+        )
       port.postMessage({ session })
       try {
         await executor(session, port, config)

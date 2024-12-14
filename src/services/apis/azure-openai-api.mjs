@@ -1,8 +1,9 @@
 import { getUserConfig } from '../../config/index.mjs'
-import { getChatSystemPromptBase, pushRecord, setAbortController } from './shared.mjs'
+import { pushRecord, setAbortController } from './shared.mjs'
 import { getConversationPairs } from '../../utils/get-conversation-pairs.mjs'
 import { fetchSSE } from '../../utils/fetch-sse.mjs'
 import { isEmpty } from 'lodash-es'
+import { getModelValue } from '../../utils/model-name-convert.mjs'
 
 /**
  * @param {Runtime.Port} port
@@ -12,19 +13,21 @@ import { isEmpty } from 'lodash-es'
 export async function generateAnswersWithAzureOpenaiApi(port, question, session) {
   const { controller, messageListener, disconnectListener } = setAbortController(port)
   const config = await getUserConfig()
+  let model = getModelValue(session)
+  if (!model) model = config.azureDeploymentName
 
   const prompt = getConversationPairs(
     session.conversationRecords.slice(-config.maxConversationContextLength),
     false,
   )
-  prompt.unshift({ role: 'system', content: await getChatSystemPromptBase() })
   prompt.push({ role: 'user', content: question })
 
   let answer = ''
   await fetchSSE(
-    `${config.azureEndpoint.replace(/\/$/, '')}/openai/deployments/${
-      config.azureDeploymentName
-    }/chat/completions?api-version=2023-03-15-preview`,
+    `${config.azureEndpoint.replace(
+      /\/$/,
+      '',
+    )}/openai/deployments/${model}/chat/completions?api-version=2024-02-01`,
     {
       method: 'POST',
       signal: controller.signal,
@@ -47,11 +50,18 @@ export async function generateAnswersWithAzureOpenaiApi(port, question, session)
           console.debug('json error', error)
           return
         }
-        if ('content' in data.choices[0].delta) {
+        if (
+          data.choices &&
+          data.choices.length > 0 &&
+          data.choices[0] &&
+          data.choices[0].delta &&
+          'content' in data.choices[0].delta
+        ) {
           answer += data.choices[0].delta.content
           port.postMessage({ answer: answer, done: false, session: null })
         }
-        if (data.choices[0].finish_reason === 'stop') {
+
+        if (data.choices && data.choices.length > 0 && data.choices[0]?.finish_reason) {
           pushRecord(session, question, answer)
           console.debug('conversation history', { content: session.conversationRecords })
           port.postMessage({ answer: null, done: true, session: session })
