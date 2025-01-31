@@ -1,21 +1,32 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import PropTypes from 'prop-types'
 import Browser from 'webextension-polyfill'
 import InputBox from '../InputBox'
 import ConversationItem from '../ConversationItem'
-import { createElementAtPosition, isFirefox, isMobile, isSafari } from '../../utils'
+import {
+  apiModeToModelName,
+  createElementAtPosition,
+  getApiModesFromConfig,
+  isApiModeSelected,
+  isFirefox,
+  isMobile,
+  isSafari,
+  isUsingModelName,
+  modelNameToDesc,
+} from '../../utils'
 import {
   ArchiveIcon,
   DesktopDownloadIcon,
   LinkExternalIcon,
   MoveToBottomIcon,
+  SearchIcon,
 } from '@primer/octicons-react'
 import { Pin, WindowDesktop, XLg } from 'react-bootstrap-icons'
 import FileSaver from 'file-saver'
 import { render } from 'preact'
 import FloatingToolbar from '../FloatingToolbar'
 import { useClampWindowSize } from '../../hooks/use-clamp-window-size'
-import { bingWebModelKeys, getUserConfig, ModelMode, Models } from '../../config/index.mjs'
+import { getUserConfig, isUsingBingWebModel, Models } from '../../config/index.mjs'
 import { useTranslation } from 'react-i18next'
 import DeleteButton from '../DeleteButton'
 import { useConfig } from '../../hooks/use-config.mjs'
@@ -46,38 +57,38 @@ function ConversationCard(props) {
   const { t } = useTranslation()
   const [isReady, setIsReady] = useState(!props.question)
   const [port, setPort] = useState(() => Browser.runtime.connect())
+  const [triggered, setTriggered] = useState(!props.waitForTrigger)
   const [session, setSession] = useState(props.session)
   const windowSize = useClampWindowSize([750, 1500], [250, 1100])
   const bodyRef = useRef(null)
   const [completeDraggable, setCompleteDraggable] = useState(false)
-  // `.some` for multi mode models. e.g. bingFree4-balanced
-  const useForegroundFetch = bingWebModelKeys.some((n) => session.modelName.includes(n))
+  const useForegroundFetch = isUsingBingWebModel(session)
+  const [apiModes, setApiModes] = useState([])
 
   /**
    * @type {[ConversationItemData[], (conversationItemData: ConversationItemData[]) => void]}
    */
-  const [conversationItemData, setConversationItemData] = useState(
-    (() => {
-      if (session.conversationRecords.length === 0)
-        if (props.question)
-          return [
-            new ConversationItemData(
-              'answer',
-              `<p class="gpt-loading">${t(`Waiting for response...`)}</p>`,
-            ),
-          ]
-        else return []
-      else {
-        const ret = []
-        for (const record of session.conversationRecords) {
-          ret.push(new ConversationItemData('question', record.question, true))
-          ret.push(new ConversationItemData('answer', record.answer, true))
-        }
-        return ret
-      }
-    })(),
-  )
+  const [conversationItemData, setConversationItemData] = useState([])
   const config = useConfig()
+
+  useLayoutEffect(() => {
+    if (session.conversationRecords.length === 0) {
+      if (props.question && triggered)
+        setConversationItemData([
+          new ConversationItemData(
+            'answer',
+            `<p class="gpt-loading">${t(`Waiting for response...`)}</p>`,
+          ),
+        ])
+    } else {
+      const ret = []
+      for (const record of session.conversationRecords) {
+        ret.push(new ConversationItemData('question', record.question, true))
+        ret.push(new ConversationItemData('answer', record.answer, true))
+      }
+      setConversationItemData(ret)
+    }
+  }, [])
 
   useEffect(() => {
     setCompleteDraggable(!isSafari() && !isFirefox() && !isMobile())
@@ -102,12 +113,21 @@ function ConversationCard(props) {
 
   useEffect(async () => {
     // when the page is responsive, session may accumulate redundant data and needs to be cleared after remounting and before making a new request
-    if (props.question) {
+    if (props.question && triggered) {
       const newSession = initSession({ ...session, question: props.question })
       setSession(newSession)
       await postMessage({ session: newSession })
     }
-  }, [props.question]) // usually only triggered once
+  }, [props.question, triggered]) // usually only triggered once
+
+  useLayoutEffect(() => {
+    setApiModes(getApiModesFromConfig(config, true))
+  }, [
+    config.activeApiModes,
+    config.customApiModes,
+    config.azureDeploymentName,
+    config.ollamaModelName,
+  ])
 
   /**
    * @param {string} value
@@ -145,8 +165,8 @@ function ConversationCard(props) {
       switch (msg.error) {
         case 'UNAUTHORIZED':
           updateAnswer(
-            `${t('UNAUTHORIZED')}<br>${t('Please login at https://chat.openai.com first')}${
-              isSafari() ? `<br>${t('Then open https://chat.openai.com/api/auth/session')}` : ''
+            `${t('UNAUTHORIZED')}<br>${t('Please login at https://chatgpt.com first')}${
+              isSafari() ? `<br>${t('Then open https://chatgpt.com/api/auth/session')}` : ''
             }<br>${t('And refresh this page or type you question again')}` +
               `<br><br>${t(
                 'Consider creating an api key at https://platform.openai.com/account/api-keys',
@@ -159,8 +179,8 @@ function ConversationCard(props) {
           updateAnswer(
             `${t('OpenAI Security Check Required')}<br>${
               isSafari()
-                ? t('Please open https://chat.openai.com/api/auth/session')
-                : t('Please open https://chat.openai.com')
+                ? t('Please open https://chatgpt.com/api/auth/session')
+                : t('Please open https://chatgpt.com')
             }<br>${t('And refresh this page or type you question again')}` +
               `<br><br>${t(
                 'Consider creating an api key at https://platform.openai.com/account/api-keys',
@@ -170,15 +190,23 @@ function ConversationCard(props) {
           )
           break
         default: {
+          let formattedError = msg.error
+          if (typeof msg.error === 'string' && msg.error.trimStart().startsWith('{'))
+            try {
+              formattedError = JSON.stringify(JSON.parse(msg.error), null, 2)
+            } catch (e) {
+              /* empty */
+            }
+
           let lastItem
           if (conversationItemData.length > 0)
             lastItem = conversationItemData[conversationItemData.length - 1]
           if (lastItem && (lastItem.content.includes('gpt-loading') || lastItem.type === 'error'))
-            updateAnswer(t(msg.error), false, 'error')
+            updateAnswer(t(formattedError), false, 'error')
           else
             setConversationItemData([
               ...conversationItemData,
-              new ConversationItemData('error', t(msg.error)),
+              new ConversationItemData('error', t(formattedError)),
             ])
           break
         }
@@ -219,7 +247,7 @@ function ConversationCard(props) {
         }
         try {
           const bingToken = (await getUserConfig()).bingAccessToken
-          if (session.modelName.includes('bingFreeSydney'))
+          if (isUsingModelName('bingFreeSydney', session))
             await generateAnswersWithBingWebApi(
               fakePort,
               session.question,
@@ -243,17 +271,30 @@ function ConversationCard(props) {
       setIsReady(true)
     }
 
-    const closeChatsListener = (message) => {
+    const closeChatsMessageListener = (message) => {
       if (message.type === 'CLOSE_CHATS') {
         port.disconnect()
+        Browser.runtime.onMessage.removeListener(closeChatsMessageListener)
+        window.removeEventListener('keydown', closeChatsEscListener)
         if (props.onClose) props.onClose()
       }
     }
+    const closeChatsEscListener = async (e) => {
+      if (e.key === 'Escape' && (await getUserConfig()).allowEscToCloseAll) {
+        closeChatsMessageListener({ type: 'CLOSE_CHATS' })
+      }
+    }
 
-    if (props.closeable) Browser.runtime.onMessage.addListener(closeChatsListener)
+    if (props.closeable) {
+      Browser.runtime.onMessage.addListener(closeChatsMessageListener)
+      window.addEventListener('keydown', closeChatsEscListener)
+    }
     port.onDisconnect.addListener(portListener)
     return () => {
-      if (props.closeable) Browser.runtime.onMessage.removeListener(closeChatsListener)
+      if (props.closeable) {
+        Browser.runtime.onMessage.removeListener(closeChatsMessageListener)
+        window.removeEventListener('keydown', closeChatsEscListener)
+      }
       port.onDisconnect.removeListener(portListener)
     }
   }, [port])
@@ -311,24 +352,26 @@ function ConversationCard(props) {
           }}
         >
           {props.closeable ? (
-            <XLg
+            <span
               className="gpt-util-icon"
               title={t('Close the Window')}
-              size={16}
               onClick={() => {
                 port.disconnect()
                 if (props.onClose) props.onClose()
               }}
-            />
+            >
+              <XLg size={16} />
+            </span>
           ) : props.dockable ? (
-            <Pin
+            <span
               className="gpt-util-icon"
               title={t('Pin the Window')}
-              size={16}
               onClick={() => {
                 if (props.onDock) props.onDock()
               }}
-            />
+            >
+              <Pin size={16} />
+            </span>
           ) : (
             <img src={logo} style="user-select:none;width:20px;height:20px;" />
           )}
@@ -337,33 +380,41 @@ function ConversationCard(props) {
             className="normal-button"
             required
             onChange={(e) => {
-              const modelName = e.target.value
-              const newSession = { ...session, modelName, aiName: Models[modelName].desc }
+              let apiMode = null
+              let modelName = 'customModel'
+              if (e.target.value !== '-1') {
+                apiMode = apiModes[e.target.value]
+                modelName = apiModeToModelName(apiMode)
+              }
+              const newSession = {
+                ...session,
+                modelName,
+                apiMode,
+                aiName: modelNameToDesc(
+                  apiMode ? apiModeToModelName(apiMode) : modelName,
+                  t,
+                  config.customModelName,
+                ),
+              }
               if (config.autoRegenAfterSwitchModel && conversationItemData.length > 0)
                 getRetryFn(newSession)()
               else setSession(newSession)
             }}
           >
-            {config.activeApiModes.map((modelName) => {
-              let desc
-              if (modelName.includes('-')) {
-                const splits = modelName.split('-')
-                if (splits[0] in Models)
-                  desc = `${t(Models[splits[0]].desc)} (${t(ModelMode[splits[1]])})`
-              } else {
-                if (modelName in Models) desc = t(Models[modelName].desc)
-              }
-              if (desc)
+            {apiModes.map((apiMode, index) => {
+              const modelName = apiModeToModelName(apiMode)
+              const desc = modelNameToDesc(modelName, t, config.customModelName)
+              if (desc) {
                 return (
-                  <option
-                    value={modelName}
-                    key={modelName}
-                    selected={modelName === session.modelName}
-                  >
+                  <option value={index} key={index} selected={isApiModeSelected(apiMode, session)}>
                     {desc}
                   </option>
                 )
+              }
             })}
+            <option value={-1} selected={!session.apiMode && session.modelName === 'customModel'}>
+              {t(Models.customModel.desc)}
+            </option>
           </select>
         </span>
         {props.draggable && !completeDraggable && (
@@ -380,7 +431,7 @@ function ConversationCard(props) {
           {!config.disableWebModeHistory && session && session.conversationId && (
             <a
               title={t('Continue on official website')}
-              href={'https://chat.openai.com/chat/' + session.conversationId}
+              href={'https://chatgpt.com/chat/' + session.conversationId}
               target="_blank"
               rel="nofollow noopener noreferrer"
               className="gpt-util-icon"
@@ -389,10 +440,9 @@ function ConversationCard(props) {
               <LinkExternalIcon size={16} />
             </a>
           )}
-          <WindowDesktop
+          <span
             className="gpt-util-icon"
             title={t('Float the Window')}
-            size={16}
             onClick={() => {
               const position = { x: window.innerWidth / 2 - 300, y: window.innerHeight / 2 - 200 }
               const toolbarContainer = createElementAtPosition(position.x, position.y)
@@ -408,7 +458,9 @@ function ConversationCard(props) {
                 toolbarContainer,
               )
             }}
-          />
+          >
+            <WindowDesktop size={16} />
+          </span>
           <DeleteButton
             size={16}
             text={t('Clear Conversation')}
@@ -446,7 +498,7 @@ function ConversationCard(props) {
                   Browser.runtime.sendMessage({
                     type: 'OPEN_URL',
                     data: {
-                      url: Browser.runtime.getURL('IndependentPanel.html'),
+                      url: Browser.runtime.getURL('IndependentPanel.html') + '?from=store',
                     },
                   }),
                 )
@@ -503,37 +555,57 @@ function ConversationCard(props) {
             key={idx}
             type={data.type}
             descName={data.type === 'answer' && session.aiName}
-            modelName={data.type === 'answer' && session.modelName}
             onRetry={idx === conversationItemData.length - 1 ? retryFn : null}
           />
         ))}
       </div>
-      <InputBox
-        enabled={isReady}
-        postMessage={postMessage}
-        reverseResizeDir={props.pageMode}
-        onSubmit={async (question) => {
-          const newQuestion = new ConversationItemData('question', question)
-          const newAnswer = new ConversationItemData(
-            'answer',
-            `<p class="gpt-loading">${t('Waiting for response...')}</p>`,
-          )
-          setConversationItemData([...conversationItemData, newQuestion, newAnswer])
-          setIsReady(false)
+      {props.waitForTrigger && !triggered ? (
+        <p
+          className="manual-btn"
+          style={{ display: 'flex', justifyContent: 'center' }}
+          onClick={() => {
+            setConversationItemData([
+              new ConversationItemData(
+                'answer',
+                `<p class="gpt-loading">${t(`Waiting for response...`)}</p>`,
+              ),
+            ])
+            setTriggered(true)
+            setIsReady(false)
+          }}
+        >
+          <span className="icon-and-text">
+            <SearchIcon size="small" /> {t('Ask ChatGPT')}
+          </span>
+        </p>
+      ) : (
+        <InputBox
+          enabled={isReady}
+          postMessage={postMessage}
+          reverseResizeDir={props.pageMode}
+          onSubmit={async (question) => {
+            const newQuestion = new ConversationItemData('question', question)
+            const newAnswer = new ConversationItemData(
+              'answer',
+              `<p class="gpt-loading">${t('Waiting for response...')}</p>`,
+            )
+            setConversationItemData([...conversationItemData, newQuestion, newAnswer])
+            setIsReady(false)
 
-          const newSession = { ...session, question, isRetry: false }
-          setSession(newSession)
-          try {
-            await postMessage({ session: newSession })
-          } catch (e) {
-            updateAnswer(e, false, 'error')
-          }
-          bodyRef.current.scrollTo({
-            top: bodyRef.current.scrollHeight,
-            behavior: 'instant',
-          })
-        }}
-      />
+            const newSession = { ...session, question, isRetry: false }
+            setSession(newSession)
+            try {
+              await postMessage({ session: newSession })
+            } catch (e) {
+              updateAnswer(e, false, 'error')
+            }
+            bodyRef.current.scrollTo({
+              top: bodyRef.current.scrollHeight,
+              behavior: 'instant',
+            })
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -549,6 +621,7 @@ ConversationCard.propTypes = {
   onDock: PropTypes.func,
   notClampSize: PropTypes.bool,
   pageMode: PropTypes.bool,
+  waitForTrigger: PropTypes.bool,
 }
 
 export default memo(ConversationCard)

@@ -15,10 +15,18 @@ import { pushRecord, setAbortController } from './shared.mjs'
  * @param {Browser.Runtime.Port} port
  * @param {string} question
  * @param {Session} session
+ * @param {string} apiUrl
  * @param {string} apiKey
  * @param {string} modelName
  */
-export async function generateAnswersWithCustomApi(port, question, session, apiKey, modelName) {
+export async function generateAnswersWithCustomApi(
+  port,
+  question,
+  session,
+  apiUrl,
+  apiKey,
+  modelName,
+) {
   const { controller, messageListener, disconnectListener } = setAbortController(port)
 
   const config = await getUserConfig()
@@ -26,11 +34,16 @@ export async function generateAnswersWithCustomApi(port, question, session, apiK
     session.conversationRecords.slice(-config.maxConversationContextLength),
     false,
   )
-  // prompt.unshift({ role: 'system', content: await getCustomApiPromptBase() })
   prompt.push({ role: 'user', content: question })
-  const apiUrl = config.customModelApiUrl
 
   let answer = ''
+  let finished = false
+  const finish = () => {
+    finished = true
+    pushRecord(session, question, answer)
+    console.debug('conversation history', { content: session.conversationRecords })
+    port.postMessage({ answer: null, done: true, session: session })
+  }
   await fetchSSE(apiUrl, {
     method: 'POST',
     signal: controller.signal,
@@ -47,10 +60,9 @@ export async function generateAnswersWithCustomApi(port, question, session, apiK
     }),
     onMessage(message) {
       console.debug('sse message', message)
+      if (finished) return
       if (message.trim() === '[DONE]') {
-        pushRecord(session, question, answer)
-        console.debug('conversation history', { content: session.conversationRecords })
-        port.postMessage({ answer: null, done: true, session: session })
+        finish()
         return
       }
       let data
@@ -62,13 +74,24 @@ export async function generateAnswersWithCustomApi(port, question, session, apiK
       }
 
       if (data.response) answer = data.response
-      else
-        answer +=
-          data.choices[0]?.delta?.content ||
-          data.choices[0]?.message?.content ||
-          data.choices[0]?.text ||
-          ''
+      else {
+        const delta = data.choices[0]?.delta?.content
+        const content = data.choices[0]?.message?.content
+        const text = data.choices[0]?.text
+        if (delta !== undefined) {
+          answer += delta
+        } else if (content) {
+          answer = content
+        } else if (text) {
+          answer += text
+        }
+      }
       port.postMessage({ answer: answer, done: false, session: null })
+
+      if (data.choices[0]?.finish_reason) {
+        finish()
+        return
+      }
     },
     async onStart() {},
     async onEnd() {

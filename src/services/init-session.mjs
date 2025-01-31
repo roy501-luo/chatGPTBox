@@ -1,5 +1,6 @@
-import { Models } from '../config/index.mjs'
 import { v4 as uuidv4 } from 'uuid'
+import { apiModeToModelName, modelNameToDesc } from '../utils/model-name-convert.mjs'
+import { t } from 'i18next'
 
 /**
  * @typedef {object} Session
@@ -16,6 +17,7 @@ import { v4 as uuidv4 } from 'uuid'
  * @property {string|null} conversationId - chatGPT web mode
  * @property {string|null} messageId - chatGPT web mode
  * @property {string|null} parentMessageId - chatGPT web mode
+ * @property {string|null} wsRequestId - chatGPT web mode
  * @property {string|null} bingWeb_encryptedConversationSignature
  * @property {string|null} bingWeb_conversationId
  * @property {string|null} bingWeb_clientId
@@ -26,6 +28,7 @@ import { v4 as uuidv4 } from 'uuid'
  * @property {number|null} poe_chatId
  * @property {object|null} bard_conversationObj
  * @property {object|null} claude_conversation
+ * @property {object|null} moonshot_conversation
  */
 /**
  * @param {string|null} question
@@ -33,6 +36,8 @@ import { v4 as uuidv4 } from 'uuid'
  * @param {string|null} sessionName
  * @param {string|null} modelName
  * @param {boolean|null} autoClean
+ * @param {Object|null} apiMode
+ * @param {string} extraCustomModelName
  * @returns {Session}
  */
 export function initSession({
@@ -41,6 +46,8 @@ export function initSession({
   sessionName = null,
   modelName = null,
   autoClean = false,
+  apiMode = null,
+  extraCustomModelName = '',
 } = {}) {
   return {
     // common
@@ -52,8 +59,16 @@ export function initSession({
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
 
-    aiName: modelName ? Models[modelName].desc : null,
+    aiName:
+      modelName || apiMode
+        ? modelNameToDesc(
+            apiMode ? apiModeToModelName(apiMode) : modelName,
+            t,
+            extraCustomModelName,
+          )
+        : null,
     modelName,
+    apiMode,
 
     autoClean,
     isRetry: false,
@@ -62,6 +77,7 @@ export function initSession({
     conversationId: null,
     messageId: null,
     parentMessageId: null,
+    wsRequestId: null,
 
     // bing
     bingWeb_encryptedConversationSignature: null,
@@ -82,5 +98,7 @@ export function initSession({
 
     // claude.ai
     claude_conversation: null,
+    // kimi.moonshot.cn
+    moonshot_conversation: null,
   }
 }
